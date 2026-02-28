@@ -1,0 +1,9 @@
+## Interface: 20505
+## Title: TradeSkill Profits
+## Notes: Shows profit per recipe in the TradeSkill frame using Auctionator pricing data.
+## Version: 1.0.0
+## Dependencies: Auctionator
+## SavedVariablesPerCharacter: TradeSkillProfits_DB
+## SavedVariables: TradeSkillProfits_DB
+
+TradeSkillProfits.lua
