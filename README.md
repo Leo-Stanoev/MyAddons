@@ -1,1 +1,1 @@
-Repo for all my WoW AddOns
+Repo for my WoW AddOns
