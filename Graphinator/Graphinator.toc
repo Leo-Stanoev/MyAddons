@@ -1,0 +1,8 @@
+## Interface: 20505
+## Title: Graphinator
+## Notes: Displays a historical price graph for the selected AH item, using Auctionator's data.
+## Author: Leonatic
+## Dependencies: Auctionator
+## SavedVariables: GraphinatorDB
+
+Graphinator.lua
