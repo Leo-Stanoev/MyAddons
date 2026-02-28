@@ -1,0 +1,9 @@
+## Interface: 20505
+## Title: VendorCost
+## Notes: Shows vendor buy price in item tooltips. Pre-loaded with 7177 items. Learns new ones by scanning vendors you visit.
+## Author: Leonatic
+## Version: 1.0
+## SavedVariables: VendorCostDB
+
+VendorCostData.lua
+VendorCost.lua
