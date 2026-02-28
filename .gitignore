@@ -5,13 +5,16 @@
 /VendorCost/*
 !/VendorCost/*.lua
 !/VendorCost/*.toc
+!/VendorCost/*.md
 
 !/TradeSkillProfits/
 /TradeSkillProfits/*
 !/TradeSkillProfits/*.lua
 !/TradeSkillProfits/*.toc
+!/TradeSkillProfits/*.md
 
 !/Graphinator/
 /Graphinator/*
 !/Graphinator/*.lua
 !/Graphinator/*.toc
+!/Graphinator/*.md
