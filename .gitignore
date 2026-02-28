@@ -1,0 +1,17 @@
+/*
+!.gitignore
+
+!/VendorCost/
+/VendorCost/*
+!/VendorCost/*.lua
+!/VendorCost/*.toc
+
+!/TradeSkillProfits/
+/TradeSkillProfits/*
+!/TradeSkillProfits/*.lua
+!/TradeSkillProfits/*.toc
+
+!/Graphinator/
+/Graphinator/*
+!/Graphinator/*.lua
+!/Graphinator/*.toc
