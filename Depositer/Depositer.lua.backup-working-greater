@@ -1,0 +1,616 @@
+--[[
+    Depositer
+    Automates the transfer of items from player bags to the bank.
+    Includes custom Stack Compressor and Bank Sorter.
+    Includes StackSplitter for scroll-wheel splitting and auto-dropping.
+    Includes Alt+Right-Click Ignore List with Tooltip injection.
+    Includes API wrappers for modern C_Container compatibility.
+]]--
+
+local ADDON_NAME = "Depositer"
+local Depositer = CreateFrame("Frame")
+
+-- Queues for pacing server actions
+local transferQueue = {} 
+local compressQueue = {}
+local sortQueue     = {}
+local isWorking     = false
+
+-- ============================================================================
+-- Database & Defaults
+-- ============================================================================
+
+local DEFAULT_SETTINGS = {
+    enable_StackSplitter = true,
+    type_Weapon    = true,
+    type_Armor     = true,
+    type_Consumable = true,
+    type_Reagent   = true,
+    type_Tradeskill = true,
+    type_Recipe    = true,
+    type_Quest     = true,
+    type_Misc      = true,
+}
+
+local function GetCfg(key) return DepositerDB[key] end
+
+local CATEGORY_MAP = {
+    ["Weapon"]       = "type_Weapon",
+    ["Armor"]        = "type_Armor",
+    ["Consumable"]   = "type_Consumable",
+    ["Reagent"]      = "type_Reagent",
+    ["Trade Goods"]  = "type_Tradeskill",
+    ["Recipe"]       = "type_Recipe",
+    ["Quest"]        = "type_Quest",
+    ["Miscellaneous"] = "type_Misc",
+}
+
+local CLASS_PRIORITY = {
+    [2] = 1,  -- Weapon
+    [4] = 2,  -- Armor
+    [0] = 3,  -- Consumable
+    [3] = 4,  -- Gem
+    [7] = 5,  -- Trade Goods (Mats)
+    [5] = 6,  -- Reagent
+    [9] = 7,  -- Recipe
+    [12] = 8, -- Quest
+    [1] = 9,  -- Container (Bag)
+    [15] = 10 -- Misc
+}
+
+-- ============================================================================
+-- API Compatibility Wrappers
+-- ============================================================================
+
+local function GetNumSlots(bag)
+    if C_Container and C_Container.GetContainerNumSlots then return C_Container.GetContainerNumSlots(bag) end
+    return GetContainerNumSlots(bag)
+end
+
+local function GetItemLink(bag, slot)
+    if C_Container and C_Container.GetContainerItemLink then return C_Container.GetContainerItemLink(bag, slot) end
+    return GetContainerItemLink(bag, slot)
+end
+
+local function UseItem(bag, slot)
+    if C_Container and C_Container.UseContainerItem then C_Container.UseContainerItem(bag, slot)
+    else UseContainerItem(bag, slot) end
+end
+
+local function PickupItem(bag, slot)
+    if C_Container and C_Container.PickupContainerItem then C_Container.PickupContainerItem(bag, slot)
+    else PickupContainerItem(bag, slot) end
+end
+
+local function GetItemCount(bag, slot)
+    if C_Container and C_Container.GetContainerItemInfo then
+        local info = C_Container.GetContainerItemInfo(bag, slot)
+        return info and info.stackCount or 0
+    end
+    local _, count = GetContainerItemInfo(bag, slot)
+    return count or 0
+end
+
+-- ============================================================================
+-- Utility: Match Logic
+-- ============================================================================
+
+local function GetItemKey(link)
+    if not link then return nil end
+    local itemString = string.match(link, "item:([%-?%d:]+)")
+    if not itemString then return nil end
+    local parts = {strsplit(":", itemString)}
+    return (parts[1] or "") .. ":" .. (parts[2] or "") .. ":" .. (parts[7] or "")
+end
+
+-- ============================================================================
+-- NEW: Ignore List Management (Alt + Right-Click)
+-- ============================================================================
+
+local function HandleAltRightClick(self, button)
+    if button == "RightButton" and IsAltKeyDown() then
+        -- Grab the item currently loaded in the tooltip (works for default UI and Baggins)
+        local _, link = GameTooltip:GetItem()
+        if link then
+            local key = GetItemKey(link)
+            if key then
+                if DepositerDB.ignoreList[key] then
+                    DepositerDB.ignoreList[key] = nil
+                    print("|cff00ff00Depositer:|r Removed from ignore list: " .. link)
+                else
+                    DepositerDB.ignoreList[key] = true
+                    print("|cff00ff00Depositer:|r Added to ignore list: " .. link)
+                end
+                
+                -- Briefly hide the tooltip to force an immediate refresh of the tag
+                GameTooltip:Hide()
+            end
+        end
+    end
+end
+
+-- Inject visual tag into item tooltips (Fixed HookScript error)
+local function OnTooltipSetItem(tooltip)
+    local _, link = tooltip:GetItem()
+    if link then
+        local key = GetItemKey(link)
+        if key and DepositerDB.ignoreList and DepositerDB.ignoreList[key] then
+            tooltip:AddLine(" ")
+            tooltip:AddLine("|TInterface\\TargetingFrame\\UI-RaidTargetingIcon_8:14|t |cffff0000[Depositer: Ignored]|r")
+            tooltip:Show()
+        end
+    end
+end
+
+-- ============================================================================
+-- Core Logic: The Big Deposit
+-- ============================================================================
+
+local function ProcessTransferQueue()
+    if #transferQueue == 0 then 
+        isWorking = false 
+        return 
+    end
+    local item = table.remove(transferQueue, 1)
+    UseItem(item.bag, item.slot)
+    C_Timer.After(0.05, ProcessTransferQueue)
+end
+
+function Depositer:RunDeposit()
+    if not BankFrame:IsShown() or isWorking then return end
+    wipe(transferQueue)
+    
+    local bankInventory = {} 
+    local uniqueItems = {}
+
+    for bag = -1, 11 do
+        if bag == -1 or (bag >= 5 and bag <= 11) then
+            for slot = 1, GetNumSlots(bag) do
+                local link = GetItemLink(bag, slot)
+                if link then
+                    local key = GetItemKey(link)
+                    if key then
+                        local count = GetItemCount(bag, slot)
+                        local _, _, _, _, _, _, _, maxStack = GetItemInfo(link)
+                        bankInventory[key] = bankInventory[key] or { partials = {} }
+                        if count < (maxStack or 1) then
+                            table.insert(bankInventory[key].partials, { bag = bag, slot = slot, space = (maxStack or 1) - count })
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    for bag = 0, 4 do
+        for slot = 1, GetNumSlots(bag) do
+            local link = GetItemLink(bag, slot)
+            if link then
+                local key = GetItemKey(link)
+                if key and bankInventory[key] and not DepositerDB.ignoreList[key] then
+                    local _, _, _, _, _, iType = GetItemInfo(link)
+                    if GetCfg(CATEGORY_MAP[iType] or "type_Misc") then
+                        table.insert(transferQueue, {bag = bag, slot = slot})
+                        uniqueItems[GetItemInfo(link)] = true
+                    end
+                end
+            end
+        end
+    end
+
+    if #transferQueue > 0 then
+        isWorking = true
+        local total = #transferQueue
+        local distinct = 0
+        for _ in pairs(uniqueItems) do distinct = distinct + 1 end
+        print(string.format("|cff00ff00Depositer:|r Moving %d items (%d types)...", total, distinct))
+        ProcessTransferQueue()
+    else
+        print("|cff00ff00Depositer:|r No matches found.")
+    end
+end
+
+-- ============================================================================
+-- Core Logic: Custom Stack Compressor
+-- ============================================================================
+
+local function ProcessCompressQueue()
+    if #compressQueue == 0 then 
+        isWorking = false
+        return 
+    end
+    
+    local move = table.remove(compressQueue, 1)
+    ClearCursor() 
+    
+    PickupItem(move.sourceBag, move.sourceSlot)
+    PickupItem(move.targetBag, move.targetSlot)
+    
+    C_Timer.After(0.1, ProcessCompressQueue)
+end
+
+function Depositer:RunCompress()
+    if not BankFrame:IsShown() or isWorking then return end
+    wipe(compressQueue)
+    
+    local function QueueMerges(bagList)
+        local partials = {}
+        for _, bag in ipairs(bagList) do
+            for slot = 1, GetNumSlots(bag) do
+                local link = GetItemLink(bag, slot)
+                if link then
+                    local key = GetItemKey(link)
+                    if key and not DepositerDB.ignoreList[key] then
+                        local count = GetItemCount(bag, slot)
+                        local _, _, _, _, _, _, _, maxStack = GetItemInfo(link)
+                        maxStack = maxStack or 1
+                        
+                        if count < maxStack then
+                            if not partials[key] then
+                                partials[key] = {bag = bag, slot = slot, count = count, maxStack = maxStack}
+                            else
+                                local target = partials[key]
+                                table.insert(compressQueue, {
+                                    sourceBag = bag, sourceSlot = slot,
+                                    targetBag = target.bag, targetSlot = target.slot
+                                })
+                                
+                                local newCount = target.count + count
+                                if newCount < maxStack then
+                                    target.count = newCount
+                                else
+                                    partials[key] = nil
+                                    if newCount > maxStack then
+                                        partials[key] = {bag = bag, slot = slot, count = newCount - maxStack, maxStack = maxStack}
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    QueueMerges({-1, 5, 6, 7, 8, 9, 10, 11})
+    QueueMerges({0, 1, 2, 3, 4})
+
+    if #compressQueue > 0 then
+        isWorking = true
+        print("|cff00ff00Depositer:|r Compressing partial stacks...")
+        ProcessCompressQueue()
+    else
+        print("|cff00ff00Depositer:|r All stacks are already compressed.")
+    end
+end
+
+-- ============================================================================
+-- Core Logic: Custom Bank Sorter (Physical Move Algorithm)
+-- ============================================================================
+
+local function ProcessSortQueue()
+    if #sortQueue == 0 then 
+        isWorking = false
+        return 
+    end
+    
+    local move = table.remove(sortQueue, 1)
+    ClearCursor()
+    
+    PickupItem(move.sourceBag, move.sourceSlot)
+    PickupItem(move.targetBag, move.targetSlot)
+    if move.isSwap then
+        PickupItem(move.sourceBag, move.sourceSlot)
+    end
+    
+    C_Timer.After(0.15, ProcessSortQueue)
+end
+
+function Depositer:RunSort()
+    if not BankFrame:IsShown() or isWorking then return end
+    wipe(sortQueue)
+    
+    local slots = {}
+    local currentState = {}
+    local itemsList = {}
+
+    for _, bag in ipairs({-1, 5, 6, 7, 8, 9, 10, 11}) do
+        for slot = 1, GetNumSlots(bag) do
+            table.insert(slots, {bag = bag, slot = slot})
+            local link = GetItemLink(bag, slot)
+            if link then
+                local name, _, quality, iLevel, _, _, _, _, _, _, _, classID, subclassID = GetItemInfo(link)
+                local itemData = {
+                    bag = bag, slot = slot,
+                    name = name or "",
+                    quality = quality or 0,
+                    iLevel = iLevel or 0,
+                    classID = classID or 99,
+                    subclassID = subclassID or 99,
+                    count = GetItemCount(bag, slot)
+                }
+                table.insert(itemsList, itemData)
+                currentState[bag.."_"..slot] = itemData
+            end
+        end
+    end
+
+    table.sort(itemsList, function(a, b)
+        local pA = CLASS_PRIORITY[a.classID] or 99
+        local pB = CLASS_PRIORITY[b.classID] or 99
+        if pA ~= pB then return pA < pB end
+        if a.subclassID ~= b.subclassID then return a.subclassID < b.subclassID end
+        if a.quality ~= b.quality then return a.quality > b.quality end
+        if a.name ~= b.name then return a.name < b.name end
+        return a.count > b.count
+    end)
+
+    local itemIndex = 1
+    for _, targetPos in ipairs(slots) do
+        local desiredItem = itemsList[itemIndex]
+        if not desiredItem then break end
+        
+        local targetKey = targetPos.bag.."_"..targetPos.slot
+        local currentItem = currentState[targetKey]
+
+        if not currentItem or currentItem.bag ~= desiredItem.bag or currentItem.slot ~= desiredItem.slot then
+            local sourcePos = {bag = desiredItem.bag, slot = desiredItem.slot}
+            local sourceKey = sourcePos.bag.."_"..sourcePos.slot
+            
+            table.insert(sortQueue, {
+                sourceBag = sourcePos.bag, sourceSlot = sourcePos.slot,
+                targetBag = targetPos.bag, targetSlot = targetPos.slot,
+                isSwap = (currentItem ~= nil)
+            })
+            
+            currentState[targetKey] = desiredItem
+            currentState[sourceKey] = currentItem
+            
+            desiredItem.bag = targetPos.bag
+            desiredItem.slot = targetPos.slot
+            
+            if currentItem then
+                currentItem.bag = sourcePos.bag
+                currentItem.slot = sourcePos.slot
+            end
+        end
+        itemIndex = itemIndex + 1
+    end
+
+    if #sortQueue > 0 then
+        isWorking = true
+        print(string.format("|cff00ff00Depositer:|r Sorting bank items... (%d moves)", #sortQueue))
+        ProcessSortQueue()
+    else
+        print("|cff00ff00Depositer:|r Bank is already sorted.")
+    end
+end
+
+-- ============================================================================
+-- NEW: StackSplitter (Scroll Wheel + Polling Auto-Drop)
+-- ============================================================================
+
+local function DropCursorItemContextually()
+    if not CursorHasItem() then return end
+
+    if SendMailFrame and SendMailFrame:IsShown() then
+        local maxAttachments = ATTACHMENTS_MAX_SEND or 7 
+        for i = 1, maxAttachments do
+            if not GetSendMailItem(i) then ClickSendMailItemButton(i); return end
+        end
+    end
+    
+    if TradeFrame and TradeFrame:IsShown() then
+        for i = 1, 6 do
+            if not GetTradePlayerItemInfo(i) then ClickTradeButton(i); return end
+        end
+    end
+    
+    if BankFrame and BankFrame:IsShown() then
+        for bag = -1, 11 do
+            if bag == -1 or (bag >= 5 and bag <= 11) then
+                for slot = 1, GetNumSlots(bag) do
+                    if not GetItemLink(bag, slot) then PickupItem(bag, slot); return end
+                end
+            end
+        end
+    end
+    
+    for bag = 0, 4 do
+        for slot = 1, GetNumSlots(bag) do
+            if not GetItemLink(bag, slot) then PickupItem(bag, slot); return end
+        end
+    end
+end
+
+local function HookStackSplitter()
+    if not StackSplitFrame then return end
+    
+    StackSplitFrame:EnableMouseWheel(true)
+    StackSplitFrame:HookScript("OnMouseWheel", function(self, delta)
+        if not GetCfg("enable_StackSplitter") then return end
+        if not self.split or not self.maxStack then return end
+        
+        local newSplit = self.split + delta
+        if newSplit < 1 then newSplit = 1 end
+        if newSplit > self.maxStack then newSplit = self.maxStack end
+        
+        self.split = newSplit
+        StackSplitText:SetText(newSplit)
+        
+        if self.LeftButton then self.LeftButton:SetEnabled(newSplit > 1) end
+        if self.RightButton then self.RightButton:SetEnabled(newSplit < self.maxStack) end
+    end)
+
+    local function MarkSplitRequest()
+        if not GetCfg("enable_StackSplitter") then return end
+        Depositer.awaitingSplitDrop = true
+        
+        local ticks = 0
+        local ticker
+        ticker = C_Timer.NewTicker(0.05, function()
+            ticks = ticks + 1
+            if ticks > 20 or not Depositer.awaitingSplitDrop then
+                ticker:Cancel()
+                return
+            end
+            if CursorHasItem() then
+                Depositer.awaitingSplitDrop = false
+                ticker:Cancel()
+                C_Timer.After(0.1, DropCursorItemContextually)
+            end
+        end)
+    end
+
+    if C_Container and C_Container.SplitContainerItem then
+        hooksecurefunc(C_Container, "SplitContainerItem", MarkSplitRequest)
+    elseif SplitContainerItem then
+        hooksecurefunc("SplitContainerItem", MarkSplitRequest)
+    end
+end
+
+-- ============================================================================
+-- Options UI
+-- ============================================================================
+
+function Depositer:OpenSettings()
+    if Settings and Settings.OpenToCategory then
+        if Depositer_SettingsCategory then Settings.OpenToCategory(Depositer_SettingsCategory.ID) end
+    else
+        InterfaceOptionsFrame_OpenToCategory("Depositer")
+        InterfaceOptionsFrame_OpenToCategory("Depositer")
+    end
+end
+
+function Depositer:SetupOptions()
+    local panel = CreateFrame("Frame", "DepositerOptionsPanel", UIParent)
+    panel.name = "Depositer"
+    local title = panel:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
+    title:SetPoint("TOPLEFT", 16, -16)
+    title:SetText("Depositer Settings")
+
+    local function CreateToggle(key, label, yOffset)
+        local cb = CreateFrame("CheckButton", nil, panel, "InterfaceOptionsCheckButtonTemplate")
+        cb:SetPoint("TOPLEFT", 16, yOffset)
+        cb.Text:SetText(label)
+        cb:SetChecked(GetCfg(key))
+        cb:SetScript("OnClick", function(self) DepositerDB[key] = self:GetChecked() end)
+        return cb
+    end
+
+    CreateToggle("enable_StackSplitter", "Enable Scroll-Wheel Splitting & Auto-Drop", -50)
+    
+    local div = panel:CreateTexture(nil, "ARTWORK")
+    div:SetColorTexture(1, 0.82, 0, 0.35)
+    div:SetPoint("TOPLEFT",  panel, "TOPLEFT",  16, -85)
+    div:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -16, -85)
+    div:SetHeight(1)
+
+    CreateToggle("type_Weapon",    "Deposit Weapons", -100)
+    CreateToggle("type_Armor",     "Deposit Armor", -130)
+    CreateToggle("type_Consumable", "Deposit Consumables", -160)
+    CreateToggle("type_Tradeskill", "Deposit Tradeskill Materials", -190)
+    CreateToggle("type_Recipe",    "Deposit Recipes", -220)
+    CreateToggle("type_Quest",     "Deposit Quest Items", -250)
+    CreateToggle("type_Misc",      "Deposit Miscellaneous", -280)
+
+    if Settings and Settings.RegisterCanvasLayoutCategory then
+        local category = Settings.RegisterCanvasLayoutCategory(panel, panel.name)
+        category.ID = panel.name
+        Settings.RegisterAddOnCategory(category)
+        Depositer_SettingsCategory = category
+    else
+        InterfaceOptions_AddCategory(panel)
+    end
+end
+
+-- ============================================================================
+-- UI Construction & Initialization
+-- ============================================================================
+
+function Depositer:CreateButtons()
+    if self.btnDeposit then return end
+
+    local dep = CreateFrame("Button", nil, BankFrame, "UIPanelButtonTemplate")
+    dep:SetSize(70, 22)
+    dep:SetText("Deposit")
+    dep:SetPoint("TOPRIGHT", BankFrame, "TOPRIGHT", -25, -14)
+    dep:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    
+    dep:SetScript("OnClick", function(_, button)
+        if button == "RightButton" and IsControlKeyDown() then self:OpenSettings()
+        else self:RunDeposit() end
+    end)
+    
+    dep:SetScript("OnEnter", function(s)
+        GameTooltip:SetOwner(s, "ANCHOR_RIGHT")
+        GameTooltip:AddLine("Depositer", 1, 0.82, 0)
+        GameTooltip:AddLine("Left-Click: Deposit matching items", 1, 1, 1)
+        GameTooltip:AddLine("Ctrl + Right-Click: Settings", 1, 1, 1)
+        GameTooltip:Show()
+    end)
+    dep:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    self.btnDeposit = dep
+
+    local comp = CreateFrame("Button", nil, BankFrame, "UIPanelButtonTemplate")
+    comp:SetSize(80, 22)
+    comp:SetText("Compress")
+    comp:SetPoint("RIGHT", dep, "LEFT", -2, 0)
+    comp:SetScript("OnClick", function() self:RunCompress() end)
+    
+    comp:SetScript("OnEnter", function(s)
+        GameTooltip:SetOwner(s, "ANCHOR_RIGHT")
+        GameTooltip:AddLine("Stack Compressor", 1, 0.82, 0)
+        GameTooltip:AddLine("Merges partial item stacks in both your bank and bags.", 1, 1, 1)
+        GameTooltip:Show()
+    end)
+    comp:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    self.btnCompress = comp
+
+    local sort = CreateFrame("Button", nil, BankFrame, "UIPanelButtonTemplate")
+    sort:SetSize(60, 22)
+    sort:SetText("Sort")
+    sort:SetPoint("RIGHT", comp, "LEFT", -2, 0)
+    sort:SetScript("OnClick", function() self:RunSort() end)
+    
+    sort:SetScript("OnEnter", function(s)
+        GameTooltip:SetOwner(s, "ANCHOR_RIGHT")
+        GameTooltip:AddLine("Bank Sorter", 1, 0.82, 0)
+        GameTooltip:AddLine("Sorts the bank by Type, Quality, and Name.", 1, 1, 1)
+        GameTooltip:Show()
+    end)
+    sort:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    self.btnSort = sort
+end
+
+Depositer:RegisterEvent("ADDON_LOADED")
+Depositer:RegisterEvent("BANKFRAME_OPENED")
+Depositer:SetScript("OnEvent", function(self, event, arg1)
+    if event == "ADDON_LOADED" and arg1 == ADDON_NAME then
+        DepositerDB = DepositerDB or {}
+        DepositerDB.ignoreList = DepositerDB.ignoreList or {}
+        for k, v in pairs(DEFAULT_SETTINGS) do if DepositerDB[k] == nil then DepositerDB[k] = v end end
+        
+        self:SetupOptions()
+        HookStackSplitter()
+        
+        -- Hook tooltips to show the Ignored tag
+        GameTooltip:HookScript("OnTooltipSetItem", OnTooltipSetItem)
+        ItemRefTooltip:HookScript("OnTooltipSetItem", OnTooltipSetItem)
+        
+        -- Dynamically hook click events to support Alt+Right Click on bags
+        if ContainerFrameItemButton_OnClick then
+            hooksecurefunc("ContainerFrameItemButton_OnClick", HandleAltRightClick)
+        end
+        if ContainerFrameItemButton_OnModifiedClick then
+            hooksecurefunc("ContainerFrameItemButton_OnModifiedClick", HandleAltRightClick)
+        end
+        -- Baggins specific hook
+        if BagginsItemButton_OnClick then
+            hooksecurefunc("BagginsItemButton_OnClick", HandleAltRightClick)
+        end
+        
+    elseif event == "BANKFRAME_OPENED" then
+        self:CreateButtons()
+    end
+end)

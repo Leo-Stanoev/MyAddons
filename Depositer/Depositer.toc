@@ -1,0 +1,8 @@
+## Interface: 20504
+## Title: Depositer
+## Notes: Automatically deposits items into the bank if an exact match already exists.
+## Author: YourName
+## Version: 1.0.0
+## SavedVariables: DepositerDB
+
+Depositer.lua
