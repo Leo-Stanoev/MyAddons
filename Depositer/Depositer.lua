@@ -189,7 +189,7 @@ local function ShouldForceDeposit(classID, subclassID)
 end
 
 -- ============================================================================
--- Dynamic Ignore List Management
+-- Dynamic Ignore List Management (Conflict Fixed Version)
 -- ============================================================================
 
 local function HandleIgnoreClick(self, button)
@@ -221,12 +221,19 @@ end
 
 local function DynamicallyHookFrameClick()
     local focus = GetMouseTarget()
-    if focus and focus.RegisterForClicks and not focus.DepositerClickHooked and not InCombatLockdown() then
-        local _, link = GameTooltip:GetItem()
-        if link then
-            focus:RegisterForClicks("AnyUp")
-            focus:HookScript("OnClick", HandleIgnoreClick)
-            focus.DepositerClickHooked = true
+    
+    if InCombatLockdown() then return end
+    
+    if focus and focus.RegisterForClicks and not focus.DepositerClickHooked then
+        local name = focus:GetName() or ""
+        
+        if name:find("Container") or name:find("Bag") or name:find("Bank") or name:find("Baggins") then
+            local _, link = GameTooltip:GetItem()
+            if link then
+                focus:RegisterForClicks("AnyUp")
+                focus:HookScript("OnClick", HandleIgnoreClick)
+                focus.DepositerClickHooked = true
+            end
         end
     end
 end
