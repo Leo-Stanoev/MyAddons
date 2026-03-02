@@ -5,6 +5,7 @@
     Includes StackSplitter for scroll-wheel splitting and auto-dropping.
     Includes Configurable Ignore List with Tooltip injection.
     Includes 'Force Deposit' for granular item subtypes.
+    Includes Quick-Settings Dropdown Menu.
     Includes API wrappers for modern C_Container compatibility.
 ]]--
 
@@ -16,6 +17,9 @@ local transferQueue = {}
 local compressQueue = {}
 local isWorking     = false
 local sortTicker    = nil
+
+-- Quick Menu Frame
+local depositDropdown = CreateFrame("Frame", "DepositerDropdown", UIParent, "UIDropDownMenuTemplate")
 
 -- ============================================================================
 -- Database & Defaults
@@ -380,7 +384,6 @@ function Depositer:RunSort()
     isWorking = true
     PrintMsg("Sorting bank items...")
 
-    -- Use a live ticker to calculate 1 step at a time, preventing desyncs
     sortTicker = C_Timer.NewTicker(0.15, function()
         if not BankFrame:IsShown() then
             sortTicker:Cancel()
@@ -391,13 +394,12 @@ function Depositer:RunSort()
         ClearCursor()
         local slots, items = {}, {}
 
-        -- 1. Scan Bank & Ignore Container Items (Bags) entirely to prevent swallow-bugs
         for _, bag in ipairs({-1, 5, 6, 7, 8, 9, 10, 11}) do
             for slot = 1, GetNumSlots(bag) do
                 local link = GetItemLink(bag, slot)
                 if link then
                     local name, _, quality, _, _, _, _, _, _, _, _, classID, subclassID = GetItemInfo(link)
-                    if classID ~= 1 then -- If NOT a bag
+                    if classID ~= 1 then
                         table.insert(slots, {bag = bag, slot = slot})
                         table.insert(items, {
                             bag = bag, slot = slot, name = name, quality = quality, 
@@ -410,7 +412,6 @@ function Depositer:RunSort()
             end
         end
 
-        -- 2. Sort the list with strict Tie-Breakers to prevent infinite swap loops
         table.sort(items, function(a, b)
             local pA = CLASS_PRIORITY[a.classID] or 99
             local pB = CLASS_PRIORITY[b.classID] or 99
@@ -419,12 +420,10 @@ function Depositer:RunSort()
             if a.quality ~= b.quality then return a.quality > b.quality end
             if a.name ~= b.name then return a.name < b.name end
             if a.count ~= b.count then return a.count > b.count end
-            -- TIE BREAKERS: Ensures identical stacks don't swap endlessly
             if a.bag ~= b.bag then return a.bag < b.bag end
             return a.slot < b.slot
         end)
 
-        -- 3. Find the first out-of-place item and move it
         local moveMade = false
         for i = 1, #items do
             local targetPos = slots[i]
@@ -433,15 +432,12 @@ function Depositer:RunSort()
             if desiredItem.bag ~= targetPos.bag or desiredItem.slot ~= targetPos.slot then
                 local targetLink = GetItemLink(targetPos.bag, targetPos.slot)
                 
-                -- Execute physical 3-way swap
                 PickupItem(desiredItem.bag, desiredItem.slot)
                 PickupItem(targetPos.bag, targetPos.slot)
-                if targetLink then
-                    PickupItem(desiredItem.bag, desiredItem.slot)
-                end
+                if targetLink then PickupItem(desiredItem.bag, desiredItem.slot) end
                 
                 moveMade = true
-                break -- Wait for next tick to verify the swap succeeded
+                break
             end
         end
 
@@ -504,7 +500,86 @@ local function HookStackSplitter()
 end
 
 -- ============================================================================
--- Options UI (2-Column Dynamic Layout)
+-- NEW: Quick-Settings Dropdown Menu
+-- ============================================================================
+
+local function AddDropdownTitle(text, level)
+    local info = UIDropDownMenu_CreateInfo()
+    info.text = text
+    info.isTitle = true
+    info.notCheckable = true
+    UIDropDownMenu_AddButton(info, level)
+end
+
+local function AddDropdownToggle(text, dbKey, level)
+    local info = UIDropDownMenu_CreateInfo()
+    info.text = text
+    info.isNotRadio = true
+    info.keepShownOnClick = true
+    info.checked = GetCfg(dbKey)
+    info.func = function() DepositerDB[dbKey] = not GetCfg(dbKey) end
+    UIDropDownMenu_AddButton(info, level)
+end
+
+local function AddDropdownSubMenu(text, menuList, level)
+    local info = UIDropDownMenu_CreateInfo()
+    info.text = text
+    info.notCheckable = true
+    info.hasArrow = true
+    info.menuList = menuList
+    UIDropDownMenu_AddButton(info, level)
+end
+
+local function DepositDropdown_Initialize(self, level, menuList)
+    level = level or 1
+
+    if level == 1 then
+        AddDropdownTitle("|cff00ff00Quick Deposit Rules|r", level)
+        AddDropdownToggle("Weapons", "type_Weapon", level)
+        AddDropdownToggle("Armor", "type_Armor", level)
+        
+        AddDropdownToggle("|cffffff00Enable Consumables|r", "type_Consumable", level)
+        AddDropdownSubMenu("  > Match Existing Stacks", "Cons_Match", level)
+        AddDropdownSubMenu("  > Force Deposit (All)", "Cons_Force", level)
+
+        AddDropdownToggle("|cffffff00Enable Trade Goods|r", "type_Tradeskill", level)
+        AddDropdownSubMenu("  > Match Existing Stacks", "Trade_Match", level)
+        AddDropdownSubMenu("  > Force Deposit (All)", "Trade_Force", level)
+
+        AddDropdownToggle("Recipes", "type_Recipe", level)
+        AddDropdownToggle("Quest Items", "type_Quest", level)
+        AddDropdownToggle("Miscellaneous", "type_Misc", level)
+
+    elseif level == 2 then
+        local items = {}
+        local keyType = ""
+
+        if menuList == "Cons_Match" then
+            AddDropdownTitle("Consumables (Match Bank)", level)
+            keyType = "match"
+            items = { {name = "Potions/Elixirs", match = "cons_Potion"}, {name = "Food & Drink", match = "cons_Food"}, {name = "Bandages", match = "cons_Bandage"}, {name = "Item Enhancements", match = "cons_Enhancement"}, {name = "Other Consumables", match = "cons_Other"} }
+        elseif menuList == "Cons_Force" then
+            AddDropdownTitle("Consumables (Force All)", level)
+            keyType = "force"
+            items = { {name = "Potions/Elixirs", force = "all_cons_Potion"}, {name = "Food & Drink", force = "all_cons_Food"}, {name = "Bandages", force = "all_cons_Bandage"}, {name = "Item Enhancements", force = "all_cons_Enhancement"}, {name = "Other Consumables", force = "all_cons_Other"} }
+        elseif menuList == "Trade_Match" then
+            AddDropdownTitle("Trade Goods (Match Bank)", level)
+            keyType = "match"
+            items = { {name = "Metal & Stone", match = "trade_MetalStone"}, {name = "Cloth", match = "trade_Cloth"}, {name = "Leather & Scales", match = "trade_Leather"}, {name = "Herbs", match = "trade_Herb"}, {name = "Meat", match = "trade_Meat"}, {name = "Primals/Elemental", match = "trade_Elemental"}, {name = "Enchanting Mats", match = "trade_Enchanting"}, {name = "Gems & JC", match = "trade_GemsJC"}, {name = "Eng. Parts/Explosives", match = "trade_Engineering"}, {name = "Spell Reagents", match = "trade_Reagent"}, {name = "Other Trade Goods", match = "trade_Other"} }
+        elseif menuList == "Trade_Force" then
+            AddDropdownTitle("Trade Goods (Force All)", level)
+            keyType = "force"
+            items = { {name = "Metal & Stone", force = "all_trade_MetalStone"}, {name = "Cloth", force = "all_trade_Cloth"}, {name = "Leather & Scales", force = "all_trade_Leather"}, {name = "Herbs", force = "all_trade_Herb"}, {name = "Meat", force = "all_trade_Meat"}, {name = "Primals/Elemental", force = "all_trade_Elemental"}, {name = "Enchanting Mats", force = "all_trade_Enchanting"}, {name = "Gems & JC", force = "all_trade_GemsJC"}, {name = "Eng. Parts/Explosives", force = "all_trade_Engineering"}, {name = "Spell Reagents", force = "all_trade_Reagent"}, {name = "Other Trade Goods", force = "all_trade_Other"} }
+        end
+
+        for _, data in ipairs(items) do
+            AddDropdownToggle(data.name, data[keyType], level)
+        end
+    end
+end
+
+-- ============================================================================
+-- Options UI (Main Interface Panel)
 -- ============================================================================
 
 function Depositer:OpenSettings()
@@ -544,7 +619,6 @@ function Depositer:SetupOptions()
         return cb, cbAll
     end
 
-    -- COLUMN 1: General & Ignore Settings (X = 16)
     local col1Y = -40
     CreateToggle("show_summary", "Show Chat Summaries", 16, col1Y); col1Y = col1Y - 30
     CreateToggle("enable_StackSplitter", "Enable Scroll-Wheel Splitting", 16, col1Y); col1Y = col1Y - 40
@@ -596,9 +670,7 @@ function Depositer:SetupOptions()
     CreateToggle("type_Armor", "Deposit Armor", 16, col1Y); col1Y = col1Y - 25
     CreateToggle("type_Misc", "Deposit Miscellaneous", 16, col1Y)
 
-    -- COLUMN 2: Subcategories & Force Rules (X = 230)
     local col2Y = -40
-    
     CreateToggle("type_Consumable", "|cffFFFF00Deposit Consumables|r", 230, col2Y); col2Y = col2Y - 22
     CreateCategoryRow("cons_Potion", "all_cons_Potion", "Potions/Elixirs", 250, col2Y); col2Y = col2Y - 22
     CreateCategoryRow("cons_Food", "all_cons_Food", "Food & Drink", 250, col2Y); col2Y = col2Y - 22
@@ -634,8 +706,12 @@ end
 -- ============================================================================
 
 local function GenericButton_OnClick(self, button)
-    if button == "RightButton" and IsControlKeyDown() then
-        Depositer:OpenSettings()
+    if button == "RightButton" then
+        if IsControlKeyDown() then
+            Depositer:OpenSettings()
+        elseif self.action == "deposit" then
+            ToggleDropDownMenu(1, nil, depositDropdown, self, 0, 0)
+        end
     else
         if self.action == "deposit" then Depositer:RunDeposit()
         elseif self.action == "compress" then Depositer:RunCompress()
@@ -653,7 +729,14 @@ function Depositer:CreateButtons()
     dep:RegisterForClicks("LeftButtonUp", "RightButtonUp")
     dep.action = "deposit"
     dep:SetScript("OnClick", GenericButton_OnClick)
-    dep:SetScript("OnEnter", function(s) GameTooltip:SetOwner(s, "ANCHOR_RIGHT"); GameTooltip:AddLine("Depositer", 1, 0.82, 0); GameTooltip:AddLine("Left-Click: Deposit items", 1, 1, 1); GameTooltip:AddLine("Ctrl + Right-Click: Settings", 0.5, 0.5, 0.5); GameTooltip:Show() end)
+    dep:SetScript("OnEnter", function(s) 
+        GameTooltip:SetOwner(s, "ANCHOR_RIGHT")
+        GameTooltip:AddLine("Depositer", 1, 0.82, 0)
+        GameTooltip:AddLine("Left-Click: Run deposit scan", 1, 1, 1)
+        GameTooltip:AddLine("Right-Click: Quick Deposit Rules", 0.5, 0.8, 1)
+        GameTooltip:AddLine("Ctrl + Right-Click: Full Settings", 0.5, 0.5, 0.5)
+        GameTooltip:Show() 
+    end)
     dep:SetScript("OnLeave", function() GameTooltip:Hide() end)
     self.btnDeposit = dep
 
@@ -664,7 +747,13 @@ function Depositer:CreateButtons()
     comp:RegisterForClicks("LeftButtonUp", "RightButtonUp")
     comp.action = "compress"
     comp:SetScript("OnClick", GenericButton_OnClick)
-    comp:SetScript("OnEnter", function(s) GameTooltip:SetOwner(s, "ANCHOR_RIGHT"); GameTooltip:AddLine("Stack Compressor", 1, 0.82, 0); GameTooltip:AddLine("Left-Click: Merge partial stacks", 1, 1, 1); GameTooltip:AddLine("Ctrl + Right-Click: Settings", 0.5, 0.5, 0.5); GameTooltip:Show() end)
+    comp:SetScript("OnEnter", function(s) 
+        GameTooltip:SetOwner(s, "ANCHOR_RIGHT")
+        GameTooltip:AddLine("Stack Compressor", 1, 0.82, 0)
+        GameTooltip:AddLine("Left-Click: Merge partial stacks", 1, 1, 1)
+        GameTooltip:AddLine("Ctrl + Right-Click: Full Settings", 0.5, 0.5, 0.5)
+        GameTooltip:Show() 
+    end)
     comp:SetScript("OnLeave", function() GameTooltip:Hide() end)
     self.btnCompress = comp
 
@@ -675,7 +764,13 @@ function Depositer:CreateButtons()
     sort:RegisterForClicks("LeftButtonUp", "RightButtonUp")
     sort.action = "sort"
     sort:SetScript("OnClick", GenericButton_OnClick)
-    sort:SetScript("OnEnter", function(s) GameTooltip:SetOwner(s, "ANCHOR_RIGHT"); GameTooltip:AddLine("Bank Sorter", 1, 0.82, 0); GameTooltip:AddLine("Left-Click: Sort by Type/Quality/Name", 1, 1, 1); GameTooltip:AddLine("Ctrl + Right-Click: Settings", 0.5, 0.5, 0.5); GameTooltip:Show() end)
+    sort:SetScript("OnEnter", function(s) 
+        GameTooltip:SetOwner(s, "ANCHOR_RIGHT")
+        GameTooltip:AddLine("Bank Sorter", 1, 0.82, 0)
+        GameTooltip:AddLine("Left-Click: Sort by Type/Quality/Name", 1, 1, 1)
+        GameTooltip:AddLine("Ctrl + Right-Click: Full Settings", 0.5, 0.5, 0.5)
+        GameTooltip:Show() 
+    end)
     sort:SetScript("OnLeave", function() GameTooltip:Hide() end)
     self.btnSort = sort
 end
@@ -688,6 +783,7 @@ Depositer:SetScript("OnEvent", function(self, event, arg1)
         DepositerDB.ignoreList = DepositerDB.ignoreList or {}
         for k, v in pairs(DEFAULT_SETTINGS) do if DepositerDB[k] == nil then DepositerDB[k] = v end end
         
+        UIDropDownMenu_Initialize(depositDropdown, DepositDropdown_Initialize, "MENU")
         self:SetupOptions()
         HookStackSplitter()
         
