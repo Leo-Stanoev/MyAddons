@@ -18,3 +18,9 @@
 !/Graphinator/*.lua
 !/Graphinator/*.toc
 !/Graphinator/*.md
+
+!/Depositer/
+/Depositer/*
+!/Depositer/*.lua
+!/Depositer/*.toc
+!/Depositer/*.md
